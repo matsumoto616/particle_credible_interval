@@ -5,52 +5,24 @@ from scipy.optimize import root_scalar
 import plotly.graph_objects as go
 import plotly.express as px
 import plotly.figure_factory as ff
+import statsmodels.api as sm
 import math
 
-def draw_density_fig(
-    particles: np.ndarray     
-):
-    """確率分布の粒子表現から、カーネル密度推定を行って密度関数を描写する。
-
-    Args:
-        particles (np.ndarray): 粒子（確率分布からのiidサンプリング結果）
-    """
-    return None
-
-def kde(x, sample, band_width, kernel):
-    n = len(sample)
-    return np.sum([1/(n*band_width)*kernel((x-sample[i])/band_width) for i in range(n)])
-
-def kde_derivative(x, sample, band_width, kernel_derivative):
-    n = len(sample)
-    return np.sum([1/(n*band_width**2)*kernel_derivative((x-sample[i])/band_width) for i in range(n)])
-
-def kde_derivative2(x, sample, band_width, kernel_derivative2):
-    n = len(sample)
-    return np.sum([1/(n*band_width**3)*kernel_derivative2((x-sample[i])/band_width) for i in range(n)])
-
-def normal_kernel(x):
-    return 1/np.sqrt(2*np.pi)*np.exp(-x**2/2)
-
-def normal_kernel_derivative(x):
-    return -x/np.sqrt(2*np.pi)*np.exp(-x**2/2)
-
-def normal_kernel_derivative2(x):
-    return -1/np.sqrt(2*np.pi)*np.exp(-x**2/2)+x**2/np.sqrt(2*np.pi)*np.exp(-x**2/2)
-
 def find_roots(
-        b, particles, band_width, kernel, kernel_derivative, kernel_derivative2
+        b, particles, dens
     ):
     roots = []
-    x0_min = min(particles) - band_width
-    x0_max = max(particles) + band_width
-    x0s = np.linspace(x0_min, x0_max, len(particles))
+    x0_min = min(particles)
+    x0_max = max(particles)
+    x0s = np.linspace(
+        x0_min - 0.1*(x0_max-x0_min),
+        x0_max + 0.1*(x0_max-x0_min),
+        len(particles)
+    )
 
     for x0 in x0s:
         result = root_scalar(
-            f=lambda x: kde(x, particles, band_width, kernel) - b,
-            fprime=lambda x: kde_derivative(x, particles, band_width, kernel_derivative),
-            fprime2=lambda x: kde_derivative2(x, particles, band_width, kernel_derivative2),
+            f=lambda x: dens.evaluate(x)[0] - b,
             x0=x0,
             xtol=1e-10
         )
@@ -63,36 +35,20 @@ def find_roots(
     roots.sort()
     return roots
 
-def get_integrate_intervals(roots, slopes_at_root):
+def get_integrate_intervals(roots, dens, b):
     integrage_intervals = []
-    for i in range(len(roots)):
-        if i == 0:
-            start = None
-            end = None
-            if slopes_at_root[i] < 0:
-                print(roots)
-                print(slopes_at_root)
-                print(roots[i], slopes_at_root[i])
-                raise Exception("maybe root findings has failed")
-            else:
+    start = None
+    end = None
+    for i in range(len(roots)-1):
+        if start is None:
+            if dens.evaluate((roots[i]+roots[i+1])/2)[0] > b:
                 start = roots[i]
         else:
-            if start is not None:
-                if slopes_at_root[i] > 0:
-                    print(roots)
-                    print(slopes_at_root)
-                    print(roots[i], slopes_at_root[i])
-                    raise Exception("maybe root findings has failed")
-                else:
-                    end = roots[i]
-            else:
-                if slopes_at_root[i] < 0:
-                    print(roots)
-                    print(slopes_at_root)
-                    print(roots[i], slopes_at_root[i])
-                    raise Exception("maybe root findings has failed")
-                else:
-                    start = roots[i]
+            if dens.evaluate((roots[i]+roots[i+1])/2)[0] < b:
+                end = roots[i]
+        if i == len(roots) - 2:
+            if dens.evaluate((roots[i]+roots[i+1])/2)[0] > b:
+                end = roots[i+1]
         if (start is not None) and (end is not None):
             integrage_intervals.append((start, end))
             start = None
@@ -100,73 +56,85 @@ def get_integrate_intervals(roots, slopes_at_root):
 
     return integrage_intervals
 
-def calc_credible_interval_probability(integrate_intervals, particles, band_width, kernel):
+def calc_credible_interval_probability(integrate_intervals, dens):
     sum = 0
     for interval in integrate_intervals:
         _sum = quad(
-            lambda x: kde(x, particles, band_width, kernel),
+            lambda x: dens.evaluate(x)[0],
             interval[0],
             interval[1]
         )
         sum += _sum[0]
     return sum
 
-def objective(b, alpha, particles, band_width):
-    roots = find_roots(
-        b, particles, band_width, normal_kernel, normal_kernel_derivative, normal_kernel_derivative2
-    )
-
-    slopes_at_root = [
-        kde_derivative(root, particles, band_width, normal_kernel_derivative)
-        for root in roots
-    ]
-
-    integrate_intervals = get_integrate_intervals(roots, slopes_at_root)
-
+def optimized_ci_objective(b, alpha, particles, dens):
+    roots = find_roots(b, particles, dens)
+    print(roots)
+    integrate_intervals = get_integrate_intervals(roots, dens, b)
+    print(integrate_intervals)
     interval_probability = calc_credible_interval_probability(
         integrate_intervals,
-        particles,
-        band_width,
-        normal_kernel
+        dens
     )
 
     print(f"b = {b}", f", interval probability = {interval_probability}")
     return alpha - interval_probability
 
-def get_credible_intervals_from_particles(particles, alpha, band_width):
-    y = [kde(_x, particles, band_width, normal_kernel) for _x in particles]
+def get_optimized_credible_intervals_from_particles(particles, alpha, band_width):
+    dens = sm.nonparametric.KDEUnivariate(particles)
+    dens.fit(bw=band_width)
+
+    y = [dens.evaluate(_x)[0] for _x in particles]
 
     result = root_scalar(
-        lambda x: objective(x, alpha, particles, band_width),
-        bracket=(min(y), max(y)),
+        lambda x: optimized_ci_objective(x, alpha, particles, dens),
+        bracket=(1e-5, max(y)),
         xtol=1e-4
     )
 
-    roots = find_roots(
-        result.root, particles, band_width, normal_kernel, normal_kernel_derivative, normal_kernel_derivative2
-    )
-
-    slopes_at_root = [
-        kde_derivative(root, particles, band_width, normal_kernel_derivative)
-        for root in roots
-    ]
-
-    intervals = get_integrate_intervals(roots, slopes_at_root)
+    roots = find_roots(result.root, particles, dens)
+    intervals = get_integrate_intervals(roots, dens, result.root)
 
     return intervals
 
+def standard_ci_objective(x, target, dens):
+    probability = quad(
+        lambda _x: dens.evaluate(_x)[0],
+        -np.inf,
+        x
+    )
+    return target - probability[0]
+
+def get_standard_credible_intervals_from_particles(particles, alpha, band_width):
+    dens = sm.nonparametric.KDEUnivariate(particles)
+    dens.fit(bw=band_width)
+
+    x0s = list(particles.copy())
+    x0s.sort()
+    for i, target in enumerate([(1-alpha)/2, alpha+(1-alpha)/2]):
+        if i == 0:
+            for x0 in x0s:
+                result = root_scalar(
+                    lambda x: standard_ci_objective(x, target, dens),
+                    x0=x0,
+                    xtol=1e-4
+                )
+                if result.converged:
+                    start = result.root
+                    break
+        else:
+            for x0 in reversed(x0s):
+                result = root_scalar(
+                    lambda x: standard_ci_objective(x, target, dens),
+                    x0=x0,
+                    xtol=1e-4
+                )
+                if result.converged:
+                    end = result.root
+                    break
+
+    return (start, end)
+
+
 if __name__ == "__main__":
-    particles = stats.norm.rvs(loc=50, scale=20, size=1000)
-    band_width = np.sqrt(
-        np.var(particles, ddof=1)*(len(particles)**(-1/5))**2
-    )
-
-    x = np.linspace(min(particles), max(particles), 1000)
-    y = [kde(_x, particles, band_width, normal_kernel) for _x in x]
-
-    fig = go.Figure(
-        go.Scatter(
-            x=x, y=y
-        )
-    )
-    fig.write_html("test.html")
+    pass
