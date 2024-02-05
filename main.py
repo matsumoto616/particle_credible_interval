@@ -47,13 +47,15 @@ standard_interval = get_standard_credible_intervals_from_particles(particles, 0.
 #%%
 fig = go.Figure(
     go.Scatter(
-        x=x, y=y
+        x=x, y=y,
+        name="kde"
     )
 )
 fig.add_trace(
     go.Scatter(
         x=particles, y=np.zeros_like(particles),
-        mode="markers"
+        mode="markers",
+        name="particles"
     )
 )
 
